@@ -24,7 +24,8 @@ Perfect for developers, system administrators, or anyone who needs quick access 
 
 ## 🖼️ Screenshots
 
-<img width="1582" height="967" alt="image" src="https://github.com/user-attachments/assets/1e096f71-7ac3-4f39-8854-ca1217476076" />
+<img width="1506" height="1035" alt="image" src="https://github.com/user-attachments/assets/deb79ae5-0982-4c21-a6ac-1ac6325c0fcb" />
+
 
 *Main interface showing file listing with permissions and actions*
 
