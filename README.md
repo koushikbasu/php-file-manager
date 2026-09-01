@@ -25,9 +25,8 @@ Perfect for developers, system administrators, or anyone who needs quick access 
 
 ## 🖼️ Screenshots
 
-<img width="1506" height="1035" alt="image" src="https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image.png" />
-[![File Browser]([image-1.png](https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image.png))
-![Terminal](image-1.png)](https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image-1.png)
+<img width="1506" height="1035" alt="PHP File Manger" src="https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image.png" />
+<img width="1506" height="1035" alt="PHP File Terminal" src="https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image-1.png" />
 *Main interface showing file listing with permissions and actions*
 
 ## 📋 Requirements
