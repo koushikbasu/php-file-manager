@@ -1,3 +1,421 @@
+<?php
+// Handle file download
+if (isset($_GET['download']) && isset($_GET['dir'])) {
+    $dir = $_GET['dir'];
+    if (is_dir($dir)) {
+        $dir = realpath($dir);
+    }
+    $file = basename($_GET['download']);
+    $file_path = rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $file;
+    
+    if (is_file($file_path) && is_readable($file_path)) {
+        $file_size = filesize($file_path);
+        $file_name = basename($file_path);
+        
+        // Set appropriate headers for download
+        header('Content-Type: application/octet-stream');
+        header('Content-Disposition: attachment; filename="' . $file_name . '"');
+        header('Content-Length: ' . $file_size);
+        header('Cache-Control: no-cache, must-revalidate');
+        header('Pragma: no-cache');
+        header('Expires: 0');
+        
+        // Read and output the file
+        readfile($file_path);
+        exit;
+    }
+    header("HTTP/1.0 404 Not Found");
+    echo json_encode(['error' => 'File not found or not readable']);
+    exit;
+}
+
+if (isset($_GET['view']) && isset($_GET['dir'])) {
+    $dir = $_GET['dir'];
+    if (is_dir($dir)) {
+        $dir = realpath($dir);
+    }
+    $file = basename($_GET['view']);
+    $file_path = rtrim($dir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR . $file;
+    
+    if (is_file($file_path) && is_readable($file_path)) {
+        if (function_exists('finfo_open')) {
+            $finfo = finfo_open(FILEINFO_MIME_TYPE);
+            $mime = finfo_file($finfo, $file_path);
+            finfo_close($finfo);
+        } else {
+            $mime = mime_content_type($file_path);
+        }
+        
+        $response = ['mime' => $mime];
+        $filesize = filesize($file_path);
+        
+        if (strpos($mime, 'image/') === 0) {
+            if ($filesize > 10 * 1024 * 1024) {
+                $response['is_image'] = false;
+                $response['content'] = 'Image is too large to display inline (max 10MB).';
+            } else {
+                $base64 = base64_encode(file_get_contents($file_path));
+                $response['is_image'] = true;
+                $response['content'] = 'data:' . $mime . ';base64,' . $base64;
+            }
+        } else {
+            $response['is_image'] = false;
+            if ($filesize > 5 * 1024 * 1024) {
+                $response['content'] = 'File is too large to display inline (max 5MB).';
+            } else {
+                $content = file_get_contents($file_path);
+                if (mb_check_encoding($content, 'UTF-8') || preg_match('//u', $content)) {
+                    $response['content'] = htmlspecialchars($content);
+                } else {
+                    $response['content'] = 'Cannot display binary file content.';
+                }
+            }
+        }
+        
+        header('Content-Type: application/json');
+        echo json_encode($response);
+        exit;
+    }
+    header("HTTP/1.0 404 Not Found");
+    echo json_encode(['error' => 'File not found or not readable']);
+    exit;
+}
+
+// Handle terminal commands
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['terminal_command'])) {
+    header('Content-Type: application/json');
+    
+    $command = trim($_POST['terminal_command']);
+    $current_dir = isset($_POST['current_dir']) ? $_POST['current_dir'] : getcwd();
+    
+    if (is_dir($current_dir)) {
+        $current_dir = realpath($current_dir);
+    } else {
+        $current_dir = getcwd();
+    }
+    
+    $output = '';
+    $error = '';
+    
+    // Parse command
+    $parts = preg_split('/\s+/', $command, 2);
+    $cmd = strtolower($parts[0]);
+    $args = isset($parts[1]) ? $parts[1] : '';
+    
+    try {
+        switch($cmd) {
+            case 'pwd':
+                $output = $current_dir;
+                break;
+            
+            case 'ls':
+            case 'dir':
+                $list_dir = trim($args) ? $current_dir . DIRECTORY_SEPARATOR . trim($args) : $current_dir;
+                if (is_dir($list_dir)) {
+                    $list_dir = realpath($list_dir);
+                    if ($handle = opendir($list_dir)) {
+                        $files = [];
+                        while (false !== ($file = readdir($handle))) {
+                            if ($file != "." && $file != "..") {
+                                $files[] = $file;
+                            }
+                        }
+                        closedir($handle);
+                        sort($files);
+                        foreach ($files as $file) {
+                            $full_path = $list_dir . DIRECTORY_SEPARATOR . $file;
+                            $type = is_dir($full_path) ? 'd' : '-';
+                            $perms = substr(sprintf('%o', fileperms($full_path)), -4);
+                            $size = is_file($full_path) ? filesize($full_path) : '-';
+                            $output .= sprintf("%-10s %10s %s\n", $type . $perms, $size, $file);
+                        }
+                    }
+                } else {
+                    $error = "Directory not found: " . htmlspecialchars($list_dir);
+                }
+                break;
+            
+            case 'chmod':
+                $chmod_parts = preg_split('/\s+/', $args);
+                $is_recursive = false;
+                $perms = null;
+                $file = null;
+                
+                // Check for -R flag
+                if (count($chmod_parts) >= 2 && $chmod_parts[0] === '-R') {
+                    $is_recursive = true;
+                    $perms = $chmod_parts[1];
+                    $file = $chmod_parts[2] ?? null;
+                } elseif (count($chmod_parts) >= 2) {
+                    $perms = $chmod_parts[0];
+                    $file = $chmod_parts[1];
+                }
+                
+                if ($perms && $file) {
+                    $file_path = $current_dir . DIRECTORY_SEPARATOR . $file;
+                    if (file_exists($file_path)) {
+                        $changed_count = 0;
+                        
+                        // Function to recursively change permissions
+                        function changePermissionsRecursive($path, $perms, &$count) {
+                            if (@chmod($path, octdec($perms))) {
+                                $count++;
+                            }
+                            if (is_dir($path)) {
+                                $items = @scandir($path);
+                                if ($items) {
+                                    foreach ($items as $item) {
+                                        if ($item !== '.' && $item !== '..') {
+                                            $subpath = $path . DIRECTORY_SEPARATOR . $item;
+                                            changePermissionsRecursive($subpath, $perms, $count);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        if ($is_recursive) {
+                            if (is_dir($file_path)) {
+                                changePermissionsRecursive($file_path, $perms, $changed_count);
+                                $output = "Permissions changed to " . $perms . " for " . htmlspecialchars($file) . " and all contents (" . $changed_count . " items)";
+                            } else {
+                                $error = "Cannot use -R on a file. Use 'chmod " . $perms . " " . htmlspecialchars($file) . "'";
+                            }
+                        } else {
+                            if (chmod($file_path, octdec($perms))) {
+                                $output = "Permissions changed to " . $perms . " for " . htmlspecialchars($file);
+                            } else {
+                                $error = "Failed to change permissions";
+                            }
+                        }
+                    } else {
+                        $error = "File not found: " . htmlspecialchars($file);
+                    }
+                } else {
+                    $error = "Usage: chmod [-R] <permissions> <file>";
+                }
+                break;
+            
+            case 'chown':
+                $chown_parts = preg_split('/\s+/', $args);
+                if (count($chown_parts) >= 2) {
+                    $owner = $chown_parts[0];
+                    $file = $chown_parts[1];
+                    $file_path = $current_dir . DIRECTORY_SEPARATOR . $file;
+                    if (file_exists($file_path)) {
+                        if (function_exists('chown')) {
+                            if (@chown($file_path, $owner)) {
+                                $output = "Owner changed to " . htmlspecialchars($owner) . " for " . htmlspecialchars($file);
+                            } else {
+                                $error = "Failed to change owner (may require root privileges)";
+                            }
+                        } else {
+                            $error = "chown function not available on this system";
+                        }
+                    } else {
+                        $error = "File not found: " . htmlspecialchars($file);
+                    }
+                } else {
+                    $error = "Usage: chown <owner> <file>";
+                }
+                break;
+            
+            case 'cat':
+                $file = trim($args);
+                $file_path = $current_dir . DIRECTORY_SEPARATOR . $file;
+                if (is_file($file_path) && is_readable($file_path)) {
+                    $size = filesize($file_path);
+                    if ($size > 1024 * 1024) {
+                        $error = "File too large to display (max 1MB)";
+                    } else {
+                        $output = file_get_contents($file_path);
+                    }
+                } else {
+                    $error = "File not found or not readable: " . htmlspecialchars($file);
+                }
+                break;
+            
+            case 'touch':
+                $file = trim($args);
+                $file_path = $current_dir . DIRECTORY_SEPARATOR . $file;
+                if (!file_exists($file_path)) {
+                    if (touch($file_path)) {
+                        $output = "File created: " . htmlspecialchars($file);
+                    } else {
+                        $error = "Failed to create file";
+                    }
+                } else {
+                    if (touch($file_path)) {
+                        $output = "File updated: " . htmlspecialchars($file);
+                    } else {
+                        $error = "Failed to update file";
+                    }
+                }
+                break;
+            
+            case 'mkdir':
+                $dir = trim($args);
+                $dir_path = $current_dir . DIRECTORY_SEPARATOR . $dir;
+                if (!is_dir($dir_path)) {
+                    if (mkdir($dir_path)) {
+                        $output = "Directory created: " . htmlspecialchars($dir);
+                    } else {
+                        $error = "Failed to create directory";
+                    }
+                } else {
+                    $error = "Directory already exists";
+                }
+                break;
+            
+            case 'rmdir':
+                $dir = trim($args);
+                $dir_path = $current_dir . DIRECTORY_SEPARATOR . $dir;
+                if (is_dir($dir_path)) {
+                    if (@rmdir($dir_path)) {
+                        $output = "Directory removed: " . htmlspecialchars($dir);
+                    } else {
+                        $error = "Failed to remove directory (must be empty)";
+                    }
+                } else {
+                    $error = "Directory not found: " . htmlspecialchars($dir);
+                }
+                break;
+            
+            case 'rm':
+                $file = trim($args);
+                $file_path = $current_dir . DIRECTORY_SEPARATOR . $file;
+                if (is_file($file_path)) {
+                    if (unlink($file_path)) {
+                        $output = "File deleted: " . htmlspecialchars($file);
+                    } else {
+                        $error = "Failed to delete file";
+                    }
+                } else {
+                    $error = "File not found: " . htmlspecialchars($file);
+                }
+                break;
+            
+            case 'cp':
+                $cp_parts = preg_split('/\s+/', $args);
+                if (count($cp_parts) >= 2) {
+                    $source = $current_dir . DIRECTORY_SEPARATOR . $cp_parts[0];
+                    $dest = $current_dir . DIRECTORY_SEPARATOR . $cp_parts[1];
+                    if (is_file($source)) {
+                        if (copy($source, $dest)) {
+                            $output = "File copied: " . htmlspecialchars($cp_parts[0]) . " -> " . htmlspecialchars($cp_parts[1]);
+                        } else {
+                            $error = "Failed to copy file";
+                        }
+                    } else {
+                        $error = "Source file not found";
+                    }
+                } else {
+                    $error = "Usage: cp <source> <destination>";
+                }
+                break;
+            
+            case 'mv':
+                $mv_parts = preg_split('/\s+/', $args);
+                if (count($mv_parts) >= 2) {
+                    $source = $current_dir . DIRECTORY_SEPARATOR . $mv_parts[0];
+                    $dest = $current_dir . DIRECTORY_SEPARATOR . $mv_parts[1];
+                    if (file_exists($source)) {
+                        if (rename($source, $dest)) {
+                            $output = "File/directory moved: " . htmlspecialchars($mv_parts[0]) . " -> " . htmlspecialchars($mv_parts[1]);
+                        } else {
+                            $error = "Failed to move file/directory";
+                        }
+                    } else {
+                        $error = "Source not found";
+                    }
+                } else {
+                    $error = "Usage: mv <source> <destination>";
+                }
+                break;
+            
+            case 'file':
+                $file = trim($args);
+                $file_path = $current_dir . DIRECTORY_SEPARATOR . $file;
+                if (file_exists($file_path)) {
+                    if (function_exists('finfo_open')) {
+                        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+                        $mime = finfo_file($finfo, $file_path);
+                        finfo_close($finfo);
+                        $output = htmlspecialchars($file) . ": " . $mime;
+                    } else {
+                        $output = htmlspecialchars($file) . ": " . (is_dir($file_path) ? "Directory" : "File");
+                    }
+                } else {
+                    $error = "File not found: " . htmlspecialchars($file);
+                }
+                break;
+            
+            case 'cd':
+                $target_dir = trim($args);
+                if (empty($target_dir) || $target_dir === '~') {
+                    // Go to home directory
+                    $target_dir = $_SERVER['HOME'] ?? '/root';
+                    $new_dir = $target_dir;
+                } elseif ($target_dir === '..') {
+                    // Go to parent directory
+                    $new_dir = dirname($current_dir);
+                } elseif ($target_dir === '/') {
+                    // Go to root
+                    $new_dir = '/';
+                } elseif (substr($target_dir, 0, 1) === '/') {
+                    // Absolute path
+                    $new_dir = $target_dir;
+                } else {
+                    // Relative path
+                    $new_dir = $current_dir . DIRECTORY_SEPARATOR . $target_dir;
+                }
+                
+                // Normalize and validate
+                $new_dir = realpath($new_dir);
+                
+                if ($new_dir && is_dir($new_dir)) {
+                    $current_dir = $new_dir;
+                    $output = "Changed directory to: " . $current_dir;
+                } else {
+                    $error = "Directory not found: " . htmlspecialchars($target_dir);
+                }
+                break;
+            
+            case 'help':
+                $output = "Available Commands:\n";
+                $output .= "  pwd                  - Print working directory\n";
+                $output .= "  cd <dir>             - Change directory (use .. for parent, ~ for home)\n";
+                $output .= "  ls [dir]             - List directory contents\n";
+                $output .= "  dir [dir]            - Alias for ls\n";
+                $output .= "  chmod [-R] <p> <f>   - Change file permissions (-R for recursive)\n";
+                $output .= "  chown <owner> <f>    - Change file owner\n";
+                $output .= "  cat <file>           - Display file contents\n";
+                $output .= "  touch <file>         - Create/update file\n";
+                $output .= "  mkdir <dir>          - Create directory\n";
+                $output .= "  rmdir <dir>          - Remove empty directory\n";
+                $output .= "  rm <file>            - Delete file\n";
+                $output .= "  cp <src> <dst>       - Copy file\n";
+                $output .= "  mv <src> <dst>       - Move/rename file\n";
+                $output .= "  file <file>          - Show file type\n";
+                $output .= "  help                 - Show this help message\n";
+                break;
+            
+            default:
+                $error = "Command not found: " . htmlspecialchars($cmd) . ". Type 'help' for available commands.";
+        }
+    } catch (Exception $e) {
+        $error = "Error: " . $e->getMessage();
+    }
+    
+    echo json_encode([
+        'success' => empty($error),
+        'output' => $output,
+        'error' => $error,
+        'current_dir' => $current_dir
+    ]);
+    exit;
+}
+?>
 <!DOCTYPE html>
 <html>
 
@@ -43,16 +461,59 @@
         display: flex;
         gap: 15px;
         margin-bottom: 25px;
-        padding: 20px;
+        padding: 25px;
         background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-        border-radius: 10px;
+        border-radius: 15px;
         flex-wrap: wrap;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+        align-items: center;
     }
 
     .toolbar form {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 12px;
+        flex: 1;
+        min-width: 350px;
+        background: rgba(255, 255, 255, 0.9);
+        padding: 15px 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        transition: all 0.3s ease;
+    }
+
+    .toolbar form:hover {
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        background: rgba(255, 255, 255, 1);
+    }
+
+    .toolbar form label {
+        font-weight: 600;
+        color: #333;
+        white-space: nowrap;
+        font-size: 0.95em;
+    }
+
+    .toolbar form input[type="text"] {
+        flex: 1;
+        padding: 12px 15px;
+        border: 2px solid #ddd;
+        border-radius: 8px;
+        font-size: 0.9em;
+        transition: all 0.3s ease;
+        background-color: #fff;
+        color: #333;
+    }
+
+    .toolbar form input[type="text"]:focus {
+        outline: none;
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        background-color: #fff;
+    }
+
+    .toolbar form input[type="text"]::placeholder {
+        color: #bbb;
     }
 
     .current-path {
@@ -207,8 +668,16 @@
     .action-form {
         display: flex;
         gap: 5px;
-        align-items: flex-start;
-        flex-wrap: wrap;
+        align-items: center;
+        flex-wrap: nowrap;
+        margin: 0;
+    }
+
+    .actions-container {
+        display: flex;
+        gap: 5px;
+        align-items: center;
+        flex-wrap: nowrap;
         width: 100%;
     }
 
@@ -219,8 +688,8 @@
         font-size: 0.9em;
         transition: border-color 0.3s ease;
         flex: 1;
-        min-width: 100px;
-        max-width: 200px;
+        min-width: 80px;
+        max-width: 120px;
         line-height: 1.5;
         box-sizing: border-box;
     }
@@ -231,16 +700,23 @@
     }
 
     .btn {
-        padding: 8px 16px;
+        padding: 12px 18px;
         border: none;
-        border-radius: 6px;
+        border-radius: 8px;
         cursor: pointer;
         font-weight: 600;
-        font-size: 0.85em;
+        font-size: 0.9em;
         transition: all 0.3s ease;
         text-transform: uppercase;
         letter-spacing: 0.5px;
         white-space: nowrap;
+        text-decoration: none;
+        display: inline-block;
+    }
+
+    .toolbar .btn {
+        padding: 12px 20px;
+        font-size: 0.85em;
     }
 
     .btn-primary {
@@ -281,30 +757,55 @@
         background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
         border-radius: 10px;
         margin-top: 20px;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.08);
+    }
+
+    .upload-section form {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
     }
 
     .upload-section label {
         font-weight: 600;
         color: #6c3483;
-        margin-bottom: 10px;
         display: block;
         font-size: 1.1em;
+        margin: 0;
+    }
+
+    .upload-file-wrapper {
+        display: flex;
+        gap: 12px;
+        align-items: center;
     }
 
     .upload-section input[type="file"] {
-        padding: 12px;
+        padding: 12px 15px;
         background-color: #fff;
         border: 2px dashed #c39bd3;
         border-radius: 8px;
-        width: 100%;
-        margin-bottom: 15px;
+        flex: 1;
         cursor: pointer;
         transition: all 0.3s ease;
+        font-size: 0.9em;
+        color: #666;
     }
 
     .upload-section input[type="file"]:hover {
         border-color: #8e44ad;
         background-color: #fef5e7;
+    }
+
+    .upload-section input[type="file"]:focus {
+        outline: none;
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    }
+
+    .upload-section .btn {
+        padding: 12px 24px;
+        white-space: nowrap;
     }
 
     .message {
@@ -380,6 +881,240 @@
         align-items: center;
     }
 
+    /* Viewer Modal Styles */
+    .modal {
+        display: none;
+        position: fixed;
+        z-index: 1000;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.6);
+        backdrop-filter: blur(5px);
+    }
+    
+    .modal-content {
+        background-color: #fefefe;
+        margin: 5% auto;
+        padding: 20px;
+        border: 1px solid #888;
+        width: 80%;
+        max-width: 900px;
+        border-radius: 12px;
+        box-shadow: 0 15px 30px rgba(0,0,0,0.3);
+        max-height: 80vh;
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .close-modal {
+        color: #aaa;
+        float: right;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+        line-height: 1;
+        text-align: right;
+    }
+    
+    .close-modal:hover,
+    .close-modal:focus {
+        color: #333;
+        text-decoration: none;
+    }
+
+    #viewer-title {
+        margin-top: 0;
+        margin-bottom: 15px;
+        padding-bottom: 15px;
+        border-bottom: 1px solid #eee;
+        color: #333;
+    }
+
+    #viewer-body {
+        overflow-y: auto;
+        flex: 1;
+        background: #f8f9fa;
+        padding: 15px;
+        border-radius: 8px;
+        border: 1px solid #e9ecef;
+    }
+
+    #viewer-body pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: 'Courier New', monospace;
+        font-size: 14px;
+    }
+
+    #viewer-body img {
+        max-width: 100%;
+        height: auto;
+        display: block;
+        margin: 0 auto;
+    }
+
+    .view-file-link {
+        color: #495057;
+        text-decoration: none;
+        cursor: pointer;
+        transition: color 0.2s;
+    }
+    
+    .view-file-link:hover {
+        color: #667eea;
+        text-decoration: underline;
+    }
+
+    /* Breadcrumbs */
+    .breadcrumb-link {
+        color: #667eea;
+        text-decoration: none;
+        transition: color 0.3s ease;
+    }
+    .breadcrumb-link:hover {
+        color: #764ba2;
+        text-decoration: underline;
+    }
+    .breadcrumb-separator {
+        color: #adb5bd;
+        margin: 0 8px;
+    }
+    .breadcrumb-home {
+        color: #667eea;
+        text-decoration: none;
+    }
+    .breadcrumb-home:hover {
+        text-decoration: underline;
+    }
+
+    /* Terminal Modal Styles */
+    .terminal-modal {
+        display: none;
+        position: fixed;
+        z-index: 1000;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.6);
+        backdrop-filter: blur(5px);
+    }
+
+    .terminal-content {
+        background-color: #1e1e1e;
+        margin: 5% auto;
+        padding: 0;
+        border: 1px solid #333;
+        width: 90%;
+        max-width: 1200px;
+        height: 70vh;
+        border-radius: 12px;
+        box-shadow: 0 15px 30px rgba(0, 0, 0, 0.5);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .terminal-header {
+        background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
+        padding: 12px 20px;
+        border-bottom: 1px solid #444;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }
+
+    .terminal-header h3 {
+        margin: 0;
+        color: #00ff00;
+        font-family: 'Courier New', monospace;
+        font-size: 1.1em;
+        font-weight: 600;
+    }
+
+    .close-terminal {
+        color: #888;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+        line-height: 1;
+        transition: color 0.3s ease;
+    }
+
+    .close-terminal:hover {
+        color: #ff4444;
+    }
+
+    #terminal {
+        flex: 1;
+        background-color: #1e1e1e;
+        color: #00ff00;
+        padding: 15px;
+        font-family: 'Courier New', monospace;
+        font-size: 14px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        line-height: 1.5;
+    }
+
+    .terminal-line {
+        word-wrap: break-word;
+        white-space: pre-wrap;
+        margin: 0;
+    }
+
+    .terminal-error {
+        color: #ff6b6b;
+    }
+
+    .terminal-warning {
+        color: #ffd93d;
+    }
+
+    .terminal-input-line {
+        display: flex;
+        align-items: center;
+        margin-top: 10px;
+    }
+
+    .terminal-prompt {
+        color: #00ff00;
+        font-weight: bold;
+        margin-right: 5px;
+        user-select: none;
+    }
+
+    #terminal-input {
+        flex: 1;
+        background-color: transparent;
+        color: #00ff00;
+        border: none;
+        font-family: 'Courier New', monospace;
+        font-size: 14px;
+        outline: none;
+        line-height: 1.5;
+    }
+
+    .terminal-button {
+        background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+        color: #fff;
+        padding: 8px 16px;
+        border: none;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 0.85em;
+        margin-left: 10px;
+    }
+
+    .terminal-button:hover {
+        box-shadow: 0 4px 12px rgba(79, 172, 254, 0.5);
+        transform: translateY(-2px);
+    }
+
     @media (max-width: 768px) {
         h1 {
             font-size: 1.8em;
@@ -387,6 +1122,22 @@
 
         .toolbar {
             flex-direction: column;
+            align-items: stretch;
+        }
+
+        .toolbar form {
+            flex-direction: column;
+            min-width: auto;
+            width: 100%;
+        }
+
+        .toolbar form input[type="text"] {
+            width: 100%;
+        }
+
+        .toolbar .btn {
+            width: 100%;
+            text-align: center;
         }
 
         table {
@@ -395,6 +1146,25 @@
 
         .action-form {
             flex-direction: column;
+        }
+
+        .upload-file-wrapper {
+            flex-direction: column;
+        }
+
+        .upload-section input[type="file"] {
+            width: 100%;
+        }
+
+        .upload-section .btn {
+            width: 100%;
+            text-align: center;
+        }
+
+        .terminal-content {
+            width: 95%;
+            height: 60vh;
+            margin: 20% auto;
         }
     }
     </style>
@@ -412,8 +1182,22 @@
                     <button type="submit" name="action" value="create_folder" class="btn btn-primary">Create
                         Folder</button>
                 </form>
+                <button type="button" class="btn btn-primary" id="open-terminal-btn">🖥️ Open Terminal</button>
             </div>
             <?php
+                    // Function to format file size in human-readable format
+                    function formatFileSize($bytes) {
+                        if ($bytes <= 0) return '0 bytes';
+                        
+                        $units = ['bytes', 'KB', 'MB', 'GB', 'TB'];
+                        $bytes = max($bytes, 0);
+                        $pow = floor(($bytes ? log($bytes) : 0) / log(1024));
+                        $pow = min($pow, count($units) - 1);
+                        $bytes /= (1 << (10 * $pow));
+                        
+                        return round($bytes, 2) . ' ' . $units[$pow];
+                    }
+
                     // Function to recursively delete a directory
                     function deleteDirectory($dir)
                     {
@@ -456,13 +1240,50 @@
                         $file_name   = $_FILES['file']['name'];
                         $file_tmp    = $_FILES['file']['tmp_name'];
                         $target_path = $current_dir . '/' . $file_name;
-                        if (move_uploaded_file($file_tmp, $target_path)) {
-                            echo "<div class='message message-success'>✓ File uploaded successfully!</div>";
+                        
+                        // Validate file name
+                        if (empty($file_name)) {
+                            echo "<div class='message message-error'>✗ Error: Invalid file name.</div>";
+                        } elseif (file_exists($target_path)) {
+                            echo "<div class='message message-error'>✗ Error: File already exists.</div>";
                         } else {
-                            echo "<div class='message message-error'>✗ Error: Could not upload file. Check permissions.</div>";
+                            if (move_uploaded_file($file_tmp, $target_path)) {
+                                echo "<div class='message message-success'>✓ File uploaded successfully!</div>";
+                            } else {
+                                // Provide detailed error information
+                                $dir_owner    = posix_getpwuid(fileowner($current_dir));
+                                $current_user = posix_getpwuid(posix_geteuid());
+                                $dir_perms    = substr(sprintf('%o', fileperms($current_dir)), -4);
+                                $error        = error_get_last();
+                                echo "<div class='message message-error'>";
+                                echo "<strong>✗ Error: Could not upload file.</strong><br><br>";
+                                echo "<strong>Directory:</strong> " . htmlspecialchars($current_dir) . "<br>";
+                                echo "<strong>Directory owner:</strong> " . $dir_owner['name'] . "<br>";
+                                echo "<strong>Script running as:</strong> " . $current_user['name'] . "<br>";
+                                echo "<strong>Directory permissions:</strong> " . $dir_perms . "<br>";
+                                echo "<strong>File name:</strong> " . htmlspecialchars($file_name) . "<br>";
+                                echo "<strong>File size:</strong> " . formatFileSize($_FILES['file']['size']) . "<br>";
+                                echo($error ? "<strong>PHP Error:</strong> " . $error['message'] . "<br><br>" : "<br>");
+                                echo "<strong>Possible solutions:</strong><br>";
+                                echo "1. Check directory write permissions<br>";
+                                echo "2. Try using the terminal: <code>chmod 777 \"" . htmlspecialchars($current_dir) . "\"</code><br>";
+                                echo "3. Check if filename contains invalid characters<br>";
+                                echo "4. Check available disk space<br>";
+                                echo "</div>";
+                            }
                         }
                     } elseif (isset($_FILES['file']) && $_FILES['file']['error'] != 0) {
-                        echo "<div class='message message-error'>✗ Upload error: " . $_FILES['file']['error'] . "</div>";
+                        $upload_errors = [
+                            UPLOAD_ERR_INI_SIZE   => 'File exceeds upload_max_filesize in php.ini',
+                            UPLOAD_ERR_FORM_SIZE  => 'File exceeds MAX_FILE_SIZE from form',
+                            UPLOAD_ERR_PARTIAL    => 'File was only partially uploaded',
+                            UPLOAD_ERR_NO_FILE    => 'No file was uploaded',
+                            UPLOAD_ERR_NO_TMP_DIR => 'Missing temporary folder',
+                            UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk',
+                            UPLOAD_ERR_EXTENSION  => 'File upload stopped by extension'
+                        ];
+                        $error_msg = $upload_errors[$_FILES['file']['error']] ?? 'Unknown upload error';
+                        echo "<div class='message message-error'>✗ Upload error: " . $error_msg . "</div>";
                     }
 
                     // Check if bulk delete is requested
@@ -579,8 +1400,39 @@
                         }
                     }
 
-                    // Display the current directory path with back button
-                    echo "<div class='current-path'><strong>📌 Current Directory:</strong> " . htmlspecialchars($current_dir) . "</div>";
+                    // Display the current directory path with breadcrumbs
+                    $path_parts = explode(DIRECTORY_SEPARATOR, trim($current_dir, DIRECTORY_SEPARATOR));
+                    $breadcrumb_html = "<strong>📌 Current Directory:</strong> <a href='?dir=/" . "' class='breadcrumb-home'>/</a>";
+                    $accumulated_path = "";
+                    
+                    if ($current_dir === DIRECTORY_SEPARATOR || empty($current_dir)) {
+                        $breadcrumb_html = "<strong>📌 Current Directory:</strong> /";
+                    } else {
+                        $is_windows = DIRECTORY_SEPARATOR === '\\';
+                        if ($is_windows) {
+                            $breadcrumb_html = "<strong>📌 Current Directory:</strong> ";
+                        }
+                        
+                        foreach ($path_parts as $index => $part) {
+                            if ($part === '') continue;
+                            
+                            if ($is_windows && $index === 0 && preg_match('/^[a-zA-Z]:$/', $part)) {
+                                $accumulated_path = $part . DIRECTORY_SEPARATOR;
+                                $breadcrumb_html .= "<a href='?dir=" . urlencode($accumulated_path) . "' class='breadcrumb-link'>" . htmlspecialchars($part) . "</a>";
+                            } else {
+                                $accumulated_path .= ($accumulated_path === '' && !$is_windows ? DIRECTORY_SEPARATOR : ($accumulated_path === '' || substr($accumulated_path, -1) === DIRECTORY_SEPARATOR ? '' : DIRECTORY_SEPARATOR)) . $part;
+                                if (!$is_windows || $index > 0) {
+                                    $breadcrumb_html .= "<span class='breadcrumb-separator'>/</span>";
+                                }
+                                if ($index === count($path_parts) - 1) {
+                                    $breadcrumb_html .= "<span style='color: #495057; font-weight: 600;'>" . htmlspecialchars($part) . "</span>";
+                                } else {
+                                    $breadcrumb_html .= "<a href='?dir=" . urlencode($accumulated_path) . "' class='breadcrumb-link'>" . htmlspecialchars($part) . "</a>";
+                                }
+                            }
+                        }
+                    }
+                    echo "<div class='current-path'>" . $breadcrumb_html . "</div>";
 
                     // Add back button to go to parent directory
                     $parent_dir = dirname($current_dir);
@@ -630,7 +1482,7 @@
 
                             // Get the file/folder type and size
                             $type = is_file($full_path) ? 'File' : 'Folder';
-                            $size = is_file($full_path) ? filesize($full_path) . ' bytes' : '-';
+                            $size = is_file($full_path) ? formatFileSize(filesize($full_path)) : '-';
 
                             // Get permissions
                             $perms        = fileperms($full_path);
@@ -690,20 +1542,26 @@
                                 // For folders, navigate into them
                                 echo "<a href=\"?dir=" . urlencode($full_path) . "\" class='folder-link'>" . htmlspecialchars($file) . "</a>";
                             } else {
-                                // For files, just display the name
-                                echo "<span class='file-name'>" . htmlspecialchars($file) . "</span>";
+                                // For files, open viewer
+                                echo "<a href='#' class='file-name view-file-link' data-file='" . htmlspecialchars($file) . "' data-dir='" . htmlspecialchars($current_dir) . "'>" . htmlspecialchars($file) . "</a>";
                             }
                             echo "</td><td><span class='type-badge type-" . strtolower($type) . "'>" . $type . "</span></td>";
                             echo "<td>" . $size . "</td>";
                             echo "<td><span class='perm-display'>" . $perms_string . "</span></td>";
                             echo "<td><span class='owner-display'>" . $owner . "</span></td>";
                             echo "<td>";
+                            echo "<div class='actions-container'>";
+
                             echo "<form method=\"POST\" class='action-form'>";
                             echo "<input type=\"hidden\" name=\"old_name\" value=\"" . htmlspecialchars($file) . "\">";
                             echo "<input type=\"text\" name=\"new_name\" placeholder=\"New name\" value=\"\">";
                             echo "<button type=\"submit\" name=\"action\" value=\"rename\" class='btn btn-warning'>Rename</button>";
                             echo "<button type=\"submit\" name=\"action\" value=\"delete\" class='btn btn-danger'>Delete</button>";
-                            echo "</form></td></tr>";
+                            echo "</form>";
+                            if (is_file($full_path)) {
+                                echo "<a href='?download=" . urlencode($file) . "&dir=" . urlencode($current_dir) . "' class='btn btn-primary'>Download</a>";
+                            }
+                            echo "</div></td></tr>";
                         }
                     } else {
                         echo "<tr><td colspan='7'>Error: Unable to open directory</td></tr>";
@@ -715,8 +1573,10 @@
                     echo "<div class='upload-section'>";
                     echo "<form method=\"POST\" enctype=\"multipart/form-data\">";
                     echo "<label for=\"file\">📤 Upload a File:</label>";
+                    echo "<div class='upload-file-wrapper'>";
                     echo "<input type=\"file\" name=\"file\" id=\"file\" required>";
                     echo "<button type=\"submit\" class='btn btn-primary'>Upload File</button>";
+                    echo "</div>";
                     echo "</form>";
                     echo "</div>";
                 ?>
@@ -726,7 +1586,80 @@
             <p>💙 PHPFileManager • Made with love by KB</p>
         </div>
     </div>
+
+    <!-- Viewer Modal -->
+    <div id="viewer-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h2 id="viewer-title">File</h2>
+            <div id="viewer-body"></div>
+        </div>
+    </div>
+
+    <!-- Terminal Modal -->
+    <div id="terminal-modal" class="terminal-modal">
+        <div class="terminal-content">
+            <div class="terminal-header">
+                <h3>🖥️ Terminal</h3>
+                <span class="close-terminal">&times;</span>
+            </div>
+            <div id="terminal"></div>
+            <div class="terminal-input-line">
+                <span class="terminal-prompt">$</span>
+                <input type="text" id="terminal-input" placeholder="Enter command..." autocomplete="off">
+                <button class="terminal-button" id="clear-terminal-btn">Clear</button>
+            </div>
+        </div>
+    </div>
+
     <script>
+        // File Viewer JS
+        const modal = document.getElementById('viewer-modal');
+        const closeBtn = document.querySelector('.close-modal');
+        const viewerTitle = document.getElementById('viewer-title');
+        const viewerBody = document.getElementById('viewer-body');
+
+        if (modal && closeBtn) {
+            closeBtn.onclick = function() {
+                modal.style.display = 'none';
+                viewerBody.innerHTML = '';
+            }
+
+            window.onclick = function(event) {
+                if (event.target == modal) {
+                    modal.style.display = 'none';
+                    viewerBody.innerHTML = '';
+                }
+            }
+        }
+
+        document.querySelectorAll('.view-file-link').forEach(link => {
+            link.addEventListener('click', function(e) {
+                e.preventDefault();
+                const fileName = this.getAttribute('data-file');
+                const dir = this.getAttribute('data-dir');
+                
+                viewerTitle.textContent = fileName;
+                viewerBody.innerHTML = 'Loading...';
+                modal.style.display = 'block';
+
+                fetch('?view=' + encodeURIComponent(fileName) + '&dir=' + encodeURIComponent(dir))
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.error) {
+                            viewerBody.innerHTML = '<div style="color: red;">' + data.error + '</div>';
+                        } else if (data.is_image) {
+                            viewerBody.innerHTML = '<img src="' + data.content + '" alt="' + fileName + '">';
+                        } else {
+                            viewerBody.innerHTML = '<pre><code>' + data.content + '</code></pre>';
+                        }
+                    })
+                    .catch(error => {
+                        viewerBody.innerHTML = '<div style="color: red;">Error loading file.</div>';
+                    });
+            });
+        });
+
 		const selectAllCheckbox = document.getElementById('select-all');
 		const fileCheckboxes = document.querySelectorAll('input[name="selected_files[]"]');
 		const bulkActionsDiv = document.querySelector('.bulk-actions');
@@ -760,6 +1693,105 @@
 				updateBulkActions();
 			});
 		});
+
+        // Terminal Modal JS
+        const terminalModal = document.getElementById('terminal-modal');
+        const terminalDisplay = document.getElementById('terminal');
+        const terminalInput = document.getElementById('terminal-input');
+        const openTerminalBtn = document.getElementById('open-terminal-btn');
+        const closeTerminalBtn = document.querySelector('.close-terminal');
+        const clearTerminalBtn = document.getElementById('clear-terminal-btn');
+        let terminalCurrentDir = window.location.pathname.split('index.php')[0] || '/';
+
+        // Open terminal
+        openTerminalBtn.addEventListener('click', function() {
+            terminalModal.style.display = 'block';
+            terminalInput.focus();
+            if (terminalDisplay.innerHTML === '') {
+                addTerminalLine('Welcome to PHPFileManager Terminal');
+                addTerminalLine('Type "help" for available commands');
+                addTerminalLine('');
+            }
+        });
+
+        // Close terminal
+        closeTerminalBtn.addEventListener('click', function() {
+            terminalModal.style.display = 'none';
+        });
+
+        // Close on background click
+        window.addEventListener('click', function(event) {
+            if (event.target === terminalModal) {
+                terminalModal.style.display = 'none';
+            }
+        });
+
+        // Clear terminal
+        clearTerminalBtn.addEventListener('click', function() {
+            terminalDisplay.innerHTML = '';
+            terminalInput.value = '';
+            terminalInput.focus();
+        });
+
+        // Add line to terminal
+        function addTerminalLine(text, type = 'normal') {
+            const line = document.createElement('div');
+            line.className = 'terminal-line';
+            if (type === 'error') {
+                line.className += ' terminal-error';
+            } else if (type === 'warning') {
+                line.className += ' terminal-warning';
+            }
+            line.textContent = text;
+            terminalDisplay.appendChild(line);
+            terminalDisplay.scrollTop = terminalDisplay.scrollHeight;
+        }
+
+        // Execute terminal command
+        function executeTerminalCommand(command) {
+            const formData = new FormData();
+            formData.append('terminal_command', command);
+            formData.append('current_dir', terminalCurrentDir);
+
+            fetch(window.location.href, {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.output) {
+                    const lines = data.output.split('\n');
+                    lines.forEach(line => {
+                        if (line.trim()) {
+                            addTerminalLine(line);
+                        }
+                    });
+                }
+                if (data.error) {
+                    addTerminalLine(data.error, 'error');
+                }
+                if (data.current_dir) {
+                    terminalCurrentDir = data.current_dir;
+                }
+                addTerminalLine('');
+            })
+            .catch(error => {
+                addTerminalLine('Error: ' + error.message, 'error');
+            });
+        }
+
+        // Handle terminal input
+        terminalInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                const command = this.value.trim();
+                if (command) {
+                    addTerminalLine('$ ' + command);
+                    this.value = '';
+                    executeTerminalCommand(command);
+                }
+                e.preventDefault();
+            }
+        });
     </script>
 </body>
 </html>
