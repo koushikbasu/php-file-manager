@@ -26,8 +26,8 @@ Perfect for developers, system administrators, or anyone who needs quick access 
 ## 🖼️ Screenshots
 
 <img width="1506" height="1035" alt="image" src="![alt text](image.png)" />
-![alt text](image-1.png)
-![alt text](image-1.png)
+[![File Browser]([image-1.png](https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image.png))
+![Terminal](image-1.png)](https://raw.githubusercontent.com/koushikbasu/php-file-manager/refs/heads/main/image-1.png)
 *Main interface showing file listing with permissions and actions*
 
 ## 📋 Requirements
